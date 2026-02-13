@@ -1,0 +1,14 @@
+# LaundryOps Telegram Bot
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+httpx>=0.26.0
+python-dotenv>=1.0.0
+supabase>=2.10.0
+
+# OpenAI: let langchain-openai pull a compatible version, or use latest
+openai>=1.12.0
+
+# LangChain: RAG, chains, NL understanding
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-openai>=0.2.0
