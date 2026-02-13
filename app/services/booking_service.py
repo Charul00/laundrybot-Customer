@@ -4,7 +4,7 @@ Collects: name, address, phone, delivery (express/standard), service type, weigh
 """
 import uuid
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Tuple
 
 from app.db.supabase_client import get_supabase
 
@@ -70,7 +70,9 @@ def is_pune_address(address: str) -> bool:
 
 
 def get_nearby_outlets_message() -> str:
-    """Return a line like 'Your nearby outlets: Outlet A (Kothrud), Outlet B (Hinjewadi), ...' for address step."""
+    """Return a line like 'Your nearby outlets: Outlet A (Kothrud), Outlet B (FC Road) (on maintenance), ...'.
+    Lists outlets by area (from pune_areas) so the user sees which areas we serve and which outlets are on maintenance,
+    even before entering their address."""
     try:
         supabase = get_supabase()
         r = supabase.table("pune_areas").select("area_name, outlet_id").execute()
@@ -78,21 +80,24 @@ def get_nearby_outlets_message() -> str:
             return "We serve Pune (Kothrud, Hinjewadi, Viman Nagar, and more)."
         if r.data:
             outlet_names = {}
+            outlet_active = {}
             for row in r.data:
                 oid = row.get("outlet_id")
                 if oid and oid not in outlet_names:
-                    o = supabase.table("outlets").select("outlet_name").eq("id", oid).limit(1).execute()
+                    o = supabase.table("outlets").select("outlet_name, is_active").eq("id", oid).limit(1).execute()
                     if o.data:
                         outlet_names[oid] = o.data[0].get("outlet_name") or "Outlet"
+                        outlet_active[oid] = o.data[0].get("is_active", True) is True
             parts = []
             for row in r.data:
                 area = (row.get("area_name") or "").strip()
                 oid = row.get("outlet_id")
-                if area:
-                    name = outlet_names.get(oid, "Outlet") if oid else "Outlet"
-                    parts.append(f"{name} ({area})")
+                if area and oid:
+                    name = outlet_names.get(oid, "Outlet")
+                    suffix = " (on maintenance)" if not outlet_active.get(oid, True) else ""
+                    parts.append(f"{name} ({area}){suffix}")
             if parts:
-                return "Your nearby outlets: " + ", ".join(parts[:8]) + "."
+                return "Your nearby outlets (by area; we assign by your address): " + ", ".join(parts[:10]) + "."
         # Fallback: list areas only
         areas = _get_pune_area_names(get_supabase())
         if areas:
@@ -102,10 +107,46 @@ def get_nearby_outlets_message() -> str:
     return "We serve Pune (Kothrud, Hinjewadi, Viman Nagar, and more)."
 
 
-def _assign_outlet_by_address(supabase, address: str) -> str:
-    """If address contains a known Pune area (e.g. Kothrud) and that area has an outlet, use it; else round-robin."""
+def get_nearby_outlet_for_address(address: str) -> Optional[Tuple[str, str, bool]]:
+    """
+    If the address contains a known Pune area (e.g. "kg road pg society kothrud" -> Kothrud),
+    return (area_name, outlet_name, is_active). Otherwise return None.
+    Used to tell the customer "Your nearby store is LaundryOps - Kothrud (Kothrud)."
+    """
     if not (address or "").strip():
-        return _assign_outlet(supabase)
+        return None
+    address_lower = address.strip().lower()
+    try:
+        supabase = get_supabase()
+        r = supabase.table("pune_areas").select("area_name, outlet_id").execute()
+        if not r.data:
+            return None
+        for row in r.data:
+            area_name = (row.get("area_name") or "").strip()
+            area_lower = area_name.lower()
+            if area_lower and area_lower in address_lower:
+                oid = row.get("outlet_id")
+                if not oid:
+                    return (area_name, area_name, True)
+                o = supabase.table("outlets").select("outlet_name, is_active").eq("id", oid).limit(1).execute()
+                if o.data:
+                    outlet_name = o.data[0].get("outlet_name") or area_name
+                    is_active = o.data[0].get("is_active", True) is True
+                    return (area_name, outlet_name, is_active)
+                return (area_name, area_name, True)
+    except Exception:
+        pass
+    return None
+
+
+def _assign_outlet_by_address(supabase, address: str) -> Tuple[str, Optional[str]]:
+    """
+    If address contains a known Pune area and that area has an *active* outlet, use it.
+    If that outlet is on maintenance (is_active=False), assign another active outlet and return a note.
+    Returns (outlet_id, maintenance_note). maintenance_note is None unless we fell back due to maintenance.
+    """
+    if not (address or "").strip():
+        return _assign_outlet(supabase), None
     address_lower = address.strip().lower()
     try:
         areas = supabase.table("pune_areas").select("area_name, outlet_id").execute()
@@ -114,10 +155,22 @@ def _assign_outlet_by_address(supabase, address: str) -> str:
                 area_name = (row.get("area_name") or "").strip().lower()
                 outlet_id = row.get("outlet_id")
                 if area_name and outlet_id and area_name in address_lower:
-                    return outlet_id
+                    out = supabase.table("outlets").select("outlet_name, is_active").eq("id", outlet_id).limit(1).execute()
+                    if out.data:
+                        is_active = out.data[0].get("is_active", True) is True
+                        if is_active:
+                            return outlet_id, None
+                        maintenance_outlet_name = out.data[0].get("outlet_name") or "Your nearest outlet"
+                    else:
+                        maintenance_outlet_name = "Your nearest outlet"
+                    fallback_id = _assign_outlet(supabase)
+                    fallback_row = supabase.table("outlets").select("outlet_name").eq("id", fallback_id).limit(1).execute()
+                    fallback_name = (fallback_row.data[0].get("outlet_name", "another outlet") if fallback_row.data and len(fallback_row.data) > 0 else "another outlet")
+                    note = f"That outlet ({maintenance_outlet_name}) is currently on maintenance. We've assigned your order to {fallback_name} instead."
+                    return fallback_id, note
     except Exception:
         pass
-    return _assign_outlet(supabase)
+    return _assign_outlet(supabase), None
 
 
 def _get_service_ids(supabase, service_names: list) -> list:
@@ -231,7 +284,15 @@ def create_booking(
             }
         raise
 
-    outlet_id = _assign_outlet_by_address(supabase, address)
+    try:
+        outlet_id, maintenance_note = _assign_outlet_by_address(supabase, address)
+    except ValueError as e:
+        if "No active outlets" in str(e):
+            return {
+                "error": "no_outlets",
+                "message": "All outlets are currently on maintenance. Please try again later.",
+            }
+        raise
     outlet_row = supabase.table("outlets").select("outlet_name").eq("id", outlet_id).single().execute()
     outlet_name = outlet_row.data.get("outlet_name", "Laundry Central") if outlet_row.data else "Laundry Central"
 
@@ -325,4 +386,5 @@ def create_booking(
         "delivery_address": da or "",
         "is_express": is_express,
         "delivery_time_iso": delivery_estimate.isoformat(),
+        "maintenance_note": maintenance_note,
     }

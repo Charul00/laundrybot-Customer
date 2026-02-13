@@ -5,7 +5,14 @@ Handles: /start, book, track, pricing, support, and natural-language order queri
 import re
 from typing import Optional, Tuple
 
-from app.services.booking_service import create_booking, estimate_price, is_pune_address, get_nearby_outlets_message
+from app.db.supabase_client import get_supabase
+from app.services.booking_service import (
+    create_booking,
+    estimate_price,
+    is_pune_address,
+    get_nearby_outlets_message,
+    get_nearby_outlet_for_address,
+)
 from app.services.tracking_service import get_order_by_number, get_orders_for_customer
 from app.services.rag_service import answer_with_rag
 from app.services.nl_query_service import answer_order_query
@@ -79,6 +86,25 @@ def handle_message(chat_id: str, text: str) -> str:
     message = (text or "").strip().lower()
     raw = (text or "").strip()
 
+    # 0) Optional rating after booking (reply 1-5 or skip)
+    state = _booking_state.get(chat_id)
+    if state and state.get("step") == "awaiting_rating":
+        order_id = state.get("order_id")
+        _booking_state.pop(chat_id, None)
+        if raw.lower() in ("skip", "no", "n", "later", "-"):
+            return "No problem. You can rate later from the app or when we ask again."
+        try:
+            rating = int(raw.strip())
+            if 1 <= rating <= 5 and order_id:
+                supabase = get_supabase()
+                supabase.table("feedback").insert({"order_id": order_id, "rating": rating}).execute()
+                return "Thanks for your rating! 🙏"
+        except ValueError:
+            pass
+        except Exception:
+            pass  # feedback table may not exist; still clear state
+        return "No problem. You can rate later (reply 1-5 or skip next time)."
+
     # 1) Booking flow state machine
     state = _booking_state.get(chat_id)
     if state:
@@ -115,7 +141,15 @@ def handle_message(chat_id: str, text: str) -> str:
             state["address"] = raw.strip()
             state["step"] = "phone"
             _booking_state[chat_id] = state
-            return "Thanks. Please send your <b>phone number</b> to confirm."
+            nearby_info = get_nearby_outlet_for_address(raw.strip())
+            if nearby_info:
+                area_name, outlet_name, is_active = nearby_info
+                prefix = f"Your nearby store is <b>{outlet_name}</b> ({area_name}). "
+                if not is_active:
+                    prefix += "(That outlet is on maintenance; we'll assign another when you book.) "
+            else:
+                prefix = ""
+            return prefix + "Thanks. Please send your <b>phone number</b> to confirm."
         if step == "phone":
             state["phone"] = raw
             state["step"] = "delivery"
@@ -241,6 +275,8 @@ def handle_message(chat_id: str, text: str) -> str:
                 )
                 if result.get("error") == "setup":
                     return result.get("message", "Please run the Supabase migration (see docs).")
+                if result.get("error") == "no_outlets":
+                    return "⚠️ " + (result.get("message") or "All outlets are currently on maintenance. Please try again later.")
                 welcome = "✅ <b>Booking confirmed</b>\n\n"
                 services_str = ", ".join((s.replace("_", " ").title() for s in result.get("services", [])))
                 weight_line = f"{result.get('weight_kg', 1)} kg"
@@ -268,7 +304,11 @@ def handle_message(chat_id: str, text: str) -> str:
                         msg += " Express: early pickup and drop."
                 else:
                     msg += "\n<b>Drop-off:</b> You can drop your clothes/shoes at the outlet."
+                if result.get("maintenance_note"):
+                    msg += "\n\n⚠️ " + result["maintenance_note"]
                 msg += "\n\nUse <b>Track</b> or ask \"Where is my order?\" for updates."
+                msg += "\n\n⭐ <b>Rate your experience?</b> (optional) Reply with <b>1-5</b> or type <b>skip</b>."
+                _booking_state[chat_id] = {"step": "awaiting_rating", "order_id": result.get("order_id")}
                 return msg
             except Exception as e:
                 err = str(e)

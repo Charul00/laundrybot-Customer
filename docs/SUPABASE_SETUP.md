@@ -16,7 +16,9 @@ Do **only** these steps in Supabase. No RLS policies or extra config are require
 | 6 | (Optional) Pickup from home: add pickup/delivery to orders | SQL Editor – run `004_orders_pickup_delivery.sql` | ☐ |
 | 7 | (Optional) Weight-based pricing: add total_weight_kg to orders | SQL Editor – run `005_orders_weight_kg.sql` | ☐ |
 | 8 | (Optional) Instructions + weight note: add customer_instructions, weight_note to orders | SQL Editor – run `006_orders_instructions_weight_note.sql` | ☐ |
-| 9 | (Optional) Insert dummy data | Run Python script once | ☐ |
+| 9 | (Optional) One outlet per area (Kothrud, FC Road, Kondhwa, etc.) | SQL Editor – run `007_outlets_one_per_area.sql` | ☐ |
+| 10 | (Optional) Staff table + seed staff per outlet | SQL Editor – run `008_staff_table_and_seed.sql` | ☐ |
+| 11 | (Optional) Insert dummy data | Run Python script once | ☐ |
 
 ---
 
@@ -102,7 +104,15 @@ Run `supabase_migrations/005_orders_weight_kg.sql` in SQL Editor. It adds `total
 
 Run `supabase_migrations/006_orders_instructions_weight_note.sql` in SQL Editor. It adds `customer_instructions` (any other instructions from the customer) and `weight_note` (e.g. "5 shirts, 2 pants" when weight was estimated from pieces). Required for the "Any other instructions?" step and for showing piece-based weight in the order.
 
-## Step 9 (Optional): Dummy data
+## Step 9 (Optional): One outlet per area
+
+Run `supabase_migrations/007_outlets_one_per_area.sql` in SQL Editor. It creates **one outlet per Pune area** (e.g. LaundryOps - Kothrud, LaundryOps - FC Road, LaundryOps - Kondhwa, Viman Nagar, Baner, Wakad, etc.) and links each area in `pune_areas` to its outlet. So you get as many outlets as locations (Kothrud, Hinjewadi, Viman Nagar, FC Road, Camp, Aundh, Baner, Pimple Saudagar, Wakad, Hadapsar, Kondhwa, Shivajinagar, Deccan, Karve Road, Sinhagad Road, Koregaon Park, MG Road, SB Road, JM Road). The admin dashboard and bot will show all of them.
+
+## Step 10 (Optional): Staff table and seed data
+
+Run `supabase_migrations/008_staff_table_and_seed.sql` in SQL Editor. It creates the `staff` table (full_name, role, outlet_id, phone_number, is_active) and seeds **one Manager and one Operator per outlet** so the admin dashboard Staff page shows data. You can edit staff in Supabase Table Editor after.
+
+## Step 11 (Optional): Dummy data
 
 To test **Track**, **Where is my order?**, and analytics, you can add sample customers and orders (run from `telegram-bot` with venv active):
 
