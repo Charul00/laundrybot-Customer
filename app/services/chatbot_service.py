@@ -1,6 +1,7 @@
 """
-Intent router + booking flow. Booking steps: name → address → phone → delivery → service → weight → pickup → instructions → create.
+Intent router + booking flow. Booking steps: name → address → phone → delivery → service → weight → pickup → instructions → payment → create.
 Handles: /start, book, track, pricing, support, and natural-language order queries.
+Payment: COD, UPI, Online (fake for dev; UPI shows fake UPI ID).
 """
 import re
 from typing import Optional, Tuple
@@ -12,6 +13,7 @@ from app.services.booking_service import (
     is_pune_address,
     get_nearby_outlets_message,
     get_nearby_outlet_for_address,
+    FAKE_UPI_ID,
 )
 from app.services.tracking_service import get_order_by_number, get_orders_for_customer
 from app.services.rag_service import answer_with_rag
@@ -19,6 +21,19 @@ from app.services.nl_query_service import answer_order_query
 
 # state: name, address, phone, delivery_type, service_choice, step, weight_kg, weight_note, customer_instructions
 _booking_state: dict = {}
+
+# Step order for progress hint in booking flow (1–10)
+_STEP_ORDER = {
+    "name": 1, "address": 2, "phone": 3, "delivery": 4, "service": 5,
+    "weight": 6, "pickup_type": 7, "home_address": 8, "instructions": 9, "payment": 10,
+}
+_TOTAL_STEPS = 10
+
+
+def _progress(step: str) -> str:
+    """Return a short progress line for the given step (e.g. 'Step 2 of 10')."""
+    n = _STEP_ORDER.get(step, 0)
+    return f"🔄 <i>Step {n} of {_TOTAL_STEPS}</i>\n\n" if n else ""
 
 # Rough weight per item (kg) when customer gives pieces instead of kg
 _WEIGHT_PER_SHIRT = 0.2
@@ -92,18 +107,18 @@ def handle_message(chat_id: str, text: str) -> str:
         order_id = state.get("order_id")
         _booking_state.pop(chat_id, None)
         if raw.lower() in ("skip", "no", "n", "later", "-"):
-            return "No problem. You can rate later from the app or when we ask again."
+            return "👍 No problem — you can rate later from the app or when we ask again."
         try:
             rating = int(raw.strip())
             if 1 <= rating <= 5 and order_id:
                 supabase = get_supabase()
                 supabase.table("feedback").insert({"order_id": order_id, "rating": rating}).execute()
-                return "Thanks for your rating! 🙏"
+                return "⭐ Thanks for your rating! We really appreciate it. 🙏"
         except ValueError:
             pass
         except Exception:
             pass  # feedback table may not exist; still clear state
-        return "No problem. You can rate later (reply 1-5 or skip next time)."
+        return "👍 You can rate later (reply 1–5 or skip next time)."
 
     # 1) Booking flow state machine
     state = _booking_state.get(chat_id)
@@ -115,7 +130,10 @@ def handle_message(chat_id: str, text: str) -> str:
             _booking_state[chat_id] = state
             nearby = get_nearby_outlets_message()
             return (
-                "Got it. Please send your <b>address</b> (one message). We currently serve <b>Pune</b> only.\n\n"
+                _progress("address")
+                + f"👋 Nice to meet you, <b>{raw}</b>!\n\n"
+                "📍 Send your <b>address</b> in one message.\n"
+                "<i>We currently serve Pune only.</i>\n\n"
                 + nearby
             )
         if step == "address":
@@ -124,8 +142,9 @@ def handle_message(chat_id: str, text: str) -> str:
                 _booking_state[chat_id] = state
                 nearby = get_nearby_outlets_message()
                 return (
-                    "Please send your <b>address</b> or <b>area</b> to continue. "
-                    "You can send your area (e.g. Viman Nagar, Baner, Kothrud) or your full address.\n\n"
+                    _progress("address")
+                    + "📍 We need your <b>address</b> or <b>area</b> to find your nearest store.\n"
+                    "Try: <i>Viman Nagar, Baner, Kothrud</i> or your full address.\n\n"
                     + nearby
                 )
             # Pune-only: accept if "pune" or any Pune area (e.g. Viman Nagar, Kothrud)
@@ -133,9 +152,9 @@ def handle_message(chat_id: str, text: str) -> str:
                 _booking_state[chat_id] = state
                 nearby = get_nearby_outlets_message()
                 return (
-                    "We currently serve <b>Pune</b> only. "
-                    "Viman Nagar, Kothrud, Hinjewadi, Baner, etc. are in Pune. "
-                    "Please send your address or area.\n\n"
+                    _progress("address")
+                    + "🌍 We’re in <b>Pune</b> right now!\n"
+                    "Send your area or full address — e.g. <i>Viman Nagar, Kothrud, Hinjewadi, Baner</i>.\n\n"
                     + nearby
                 )
             state["address"] = raw.strip()
@@ -144,32 +163,35 @@ def handle_message(chat_id: str, text: str) -> str:
             nearby_info = get_nearby_outlet_for_address(raw.strip())
             if nearby_info:
                 area_name, outlet_name, is_active = nearby_info
-                prefix = f"Your nearby store is <b>{outlet_name}</b> ({area_name}). "
+                prefix = f"🏪 Your nearest store: <b>{outlet_name}</b> ({area_name}).\n\n"
                 if not is_active:
-                    prefix += "(That outlet is on maintenance; we'll assign another when you book.) "
+                    prefix += "<i>That outlet is on maintenance; we’ll assign another when you book.</i>\n\n"
             else:
                 prefix = ""
-            return prefix + "Thanks. Please send your <b>phone number</b> to confirm."
+            return _progress("phone") + prefix + "📞 Send your <b>phone number</b> so we can confirm your booking."
         if step == "phone":
             state["phone"] = raw
             state["step"] = "delivery"
             _booking_state[chat_id] = state
             return (
-                "Choose <b>delivery</b>:\n"
-                "• Reply <b>1</b> for <b>Standard</b> (about 48 hours)\n"
-                "• Reply <b>2</b> for <b>Express</b> (about 24 hours, +30% fee)"
+                _progress("delivery")
+                + "🚚 <b>When do you need it?</b>\n\n"
+                "• <b>1</b> — Standard (about 48 hrs)\n"
+                "• <b>2</b> — Express (about 24 hrs, +30% fee)\n\n"
+                "Reply with <b>1</b> or <b>2</b>."
             )
         if step == "delivery":
             state["delivery_type"] = "express" if message in ("2", "express") else "standard"
             state["step"] = "service"
             _booking_state[chat_id] = state
             return (
-                "Choose <b>service</b>:\n"
-                "• <b>1</b> – Wash only\n"
-                "• <b>2</b> – Wash + Iron\n"
-                "• <b>3</b> – Dry clean\n"
-                "• <b>4</b> – Shoe clean\n\n"
-                "Reply with 1, 2, 3, or 4."
+                _progress("service")
+                + "🧺 <b>Pick a service</b>\n\n"
+                "• <b>1</b> — Wash only\n"
+                "• <b>2</b> — Wash + Iron\n"
+                "• <b>3</b> — Dry clean\n"
+                "• <b>4</b> — Shoe clean\n\n"
+                "Reply with <b>1</b>, <b>2</b>, <b>3</b>, or <b>4</b>."
             )
         if step == "service":
             choice_map = {"1": "wash_only", "2": "wash_iron", "3": "dry_clean", "4": "shoe_clean"}
@@ -177,23 +199,25 @@ def handle_message(chat_id: str, text: str) -> str:
             state["step"] = "weight"
             _booking_state[chat_id] = state
             return (
-                "How many <b>kg of clothes</b>? (e.g. 2 or 3.5)\n\n"
-                "If you don't know the weight, you can send your <b>total clothes</b> instead, e.g.:\n"
+                _progress("weight")
+                + "⚖️ <b>How much laundry?</b>\n\n"
+                "Send <b>weight in kg</b> (e.g. 2 or 3.5) or <b>clothes count</b>:\n"
                 "• <b>5 shirts, 2 pants</b>\n"
                 "• <b>8 pieces</b> or <b>10 clothes</b>\n\n"
-                "Price is calculated per kg based on the service you chose."
+                "<i>We’ll estimate weight and show your bill.</i>"
             )
         if step == "weight":
             weight_kg, weight_note = _parse_weight_from_message(raw)
             if weight_kg is None:
                 _booking_state[chat_id] = state
                 return (
-                    "Please send weight in <b>kg</b> (e.g. 2 or 3.5) or your <b>total clothes</b> "
+                    _progress("weight")
+                    + "⚖️ Send weight in <b>kg</b> (e.g. 2 or 3.5) or <b>clothes count</b> "
                     "(e.g. 5 shirts, 2 pants or 8 pieces)."
                 )
             if weight_kg < 0.5 or weight_kg > 100:
                 _booking_state[chat_id] = state
-                return "Please enter weight between 0.5 and 100 kg (or equivalent pieces)."
+                return _progress("weight") + "⚖️ Weight must be between <b>0.5</b> and <b>100 kg</b> (or equivalent pieces)."
             state["weight_kg"] = weight_kg
             state["weight_note"] = weight_note
             state["step"] = "pickup_type"
@@ -206,17 +230,18 @@ def handle_message(chat_id: str, text: str) -> str:
             )
             if total_bill is not None:
                 if weight_note:
-                    bill_msg = f"Got it. Estimated weight <b>{weight_kg} kg</b> (from {weight_note}). Your total bill is <b>₹{total_bill}</b>.\n\n"
+                    bill_msg = f"💵 Estimated <b>{weight_kg} kg</b> (from {weight_note}). Your total: <b>₹{total_bill}</b>.\n\n"
                 else:
-                    bill_msg = f"Got it. Your total bill for <b>{weight_kg} kg</b> is <b>₹{total_bill}</b>.\n\n"
+                    bill_msg = f"💵 Your total for <b>{weight_kg} kg</b>: <b>₹{total_bill}</b>.\n\n"
             else:
-                bill_msg = "Got it.\n\n"
+                bill_msg = ""
             return (
-                bill_msg
-                + "How do you want <b>pickup</b>?\n"
-                "• <b>1</b> – I'll drop at outlet (you bring clothes to outlet)\n"
-                "• <b>2</b> – Pickup from my address (agent will come, pick clothes, and deliver back when ready)\n\n"
-                "Reply with 1 or 2."
+                _progress("pickup_type")
+                + bill_msg
+                + "📍 <b>Pickup option</b>\n\n"
+                "• <b>1</b> — I’ll drop at outlet (you bring clothes to store)\n"
+                "• <b>2</b> — Pickup from my address (we pick up & deliver back)\n\n"
+                "Reply with <b>1</b> or <b>2</b>."
             )
         if step == "pickup_type":
             pickup_type = "home_pickup" if message in ("2", "home", "pickup") else "self_drop"
@@ -225,37 +250,69 @@ def handle_message(chat_id: str, text: str) -> str:
                 state["step"] = "home_address"
                 _booking_state[chat_id] = state
                 return (
-                    "Please send your <b>full home address</b> for pickup and delivery.\n\n"
-                    "Our agent will <b>pick up</b> from this address and <b>deliver back</b> here when ready."
+                    _progress("home_address")
+                    + "🏠 <b>Pickup & delivery address</b>\n\n"
+                    "Send your <b>full address</b>. We’ll pick up from here and deliver back when ready."
                 )
             state["step"] = "instructions"
             _booking_state[chat_id] = state
             return (
-                "Any other <b>instructions</b> for us? (e.g. delicate, no softener, specific folding)\n\n"
-                "Type your message, or <b>no</b> / <b>none</b> to skip."
+                _progress("instructions")
+                + "📝 <b>Any special instructions?</b>\n\n"
+                "e.g. delicate, no softener, folding preference — or type <b>no</b> / <b>none</b> to skip."
             )
         if step == "home_address":
             home_addr = raw.strip() if raw.strip() else ""
             if not home_addr:
                 _booking_state[chat_id] = state
-                return "Please send your full home address for pickup and delivery."
+                return _progress("home_address") + "🏠 Please send your full address for pickup and delivery."
             state["pickup_address"] = home_addr
             state["delivery_address"] = home_addr
             state["step"] = "instructions"
             _booking_state[chat_id] = state
             return (
-                "Any other <b>instructions</b> for us? (e.g. delicate, no softener, specific folding)\n\n"
-                "Type your message, or <b>no</b> / <b>none</b> to skip."
+                _progress("instructions")
+                + "📝 <b>Any special instructions?</b>\n\n"
+                "e.g. delicate, no softener — or type <b>no</b> / <b>none</b> to skip."
             )
         if step == "instructions":
             instructions = raw.strip() if raw.strip() else ""
             if instructions and instructions.lower() in ("no", "none", "nope", "skip", "-"):
                 instructions = ""
             state["customer_instructions"] = instructions
+            state["step"] = "payment"
+            _booking_state[chat_id] = state
+            return (
+                _progress("payment")
+                + "💰 <b>How would you like to pay?</b>\n\n"
+                "• <b>1</b> — 💵 Cash on delivery (pay when we deliver)\n"
+                "• <b>2</b> — 📱 UPI (pay to our UPI ID now or later)\n"
+                "• <b>3</b> — 💳 Card / Online payment\n\n"
+                "Reply with <b>1</b>, <b>2</b>, or <b>3</b>."
+            )
+        if step == "payment":
+            # Map 1/2/3 or cash/upi/card to cod/upi/online
+            pm = message.strip()
+            if pm in ("1", "cash", "cod", "cash on delivery"):
+                payment_method = "cod"
+            elif pm in ("2", "upi"):
+                payment_method = "upi"
+            elif pm in ("3", "card", "online", "netbanking"):
+                payment_method = "online"
+            else:
+                _booking_state[chat_id] = state
+                return (
+                    _progress("payment")
+                    + "💰 Choose how you’d like to pay:\n\n"
+                    "• <b>1</b> — Cash on delivery\n"
+                    "• <b>2</b> — UPI\n"
+                    "• <b>3</b> — Card / Online\n\n"
+                    "Reply with <b>1</b>, <b>2</b>, or <b>3</b>."
+                )
+            state["payment_method"] = payment_method
             _booking_state.pop(chat_id, None)
             address = state.get("address", "")
             pickup_type = state.get("pickup_type", "self_drop")
-            # Use home address from "home_address" step when they chose pickup from home
             pickup_address = state.get("pickup_address", "") if pickup_type == "home_pickup" else ""
             delivery_address = state.get("delivery_address", "") if pickup_type == "home_pickup" else ""
             try:
@@ -272,42 +329,55 @@ def handle_message(chat_id: str, text: str) -> str:
                     pickup_type=pickup_type,
                     pickup_address=pickup_address,
                     delivery_address=delivery_address,
+                    payment_method=payment_method,
                 )
                 if result.get("error") == "setup":
                     return result.get("message", "Please run the Supabase migration (see docs).")
                 if result.get("error") == "no_outlets":
                     return "⚠️ " + (result.get("message") or "All outlets are currently on maintenance. Please try again later.")
-                welcome = "✅ <b>Booking confirmed</b>\n\n"
+                welcome = (
+                    "🎉 <b>Booking confirmed!</b> 🎉\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n\n"
+                )
                 services_str = ", ".join((s.replace("_", " ").title() for s in result.get("services", [])))
                 weight_line = f"{result.get('weight_kg', 1)} kg"
                 if result.get("weight_note"):
                     weight_line += f" (from {result['weight_note']})"
                 delivery_type_str = "Express (≈24 hrs)" if result.get("is_express") else "Standard (≈48 hrs)"
+                pm = (result.get("payment_method") or "cod").strip().lower()
+                if pm == "upi":
+                    payment_line = f"💰 <b>Payment:</b> UPI — Pay to <code>{FAKE_UPI_ID}</code>\n"
+                elif pm == "online":
+                    payment_line = "💰 <b>Payment:</b> Card/Online — Link will be shared separately.\n"
+                else:
+                    payment_line = "💰 <b>Payment:</b> Cash on delivery (pay when we deliver).\n"
                 msg = (
                     welcome
                     + "📋 <b>Booking details</b>\n"
-                    + "────────────────\n"
-                    + f"<b>Order ID:</b> <code>{result['order_number']}</code>\n"
-                    + f"<b>Services:</b> {services_str}\n"
-                    + f"<b>Weight:</b> {weight_line}\n"
-                    + f"<b>Delivery:</b> {delivery_type_str}\n"
-                    + f"<b>Outlet:</b> {result['outlet_name']}\n"
-                    + f"<b>Expected delivery:</b> in about {result['expected_hours']} hours\n"
-                    + f"<b>Total:</b> ₹{result.get('total_price', 0)}\n"
+                    + "━━━━━━━━━━━━━━━━━━━━\n"
+                    + f"📌 <b>Order ID:</b> <code>{result['order_number']}</code>\n"
+                    + f"🧺 <b>Services:</b> {services_str}\n"
+                    + f"⚖️ <b>Weight:</b> {weight_line}\n"
+                    + f"🚚 <b>Delivery:</b> {delivery_type_str}\n"
+                    + f"🏪 <b>Outlet:</b> {result['outlet_name']}\n"
+                    + f"⏱ <b>Expected:</b> in about {result['expected_hours']} hours\n"
+                    + f"💵 <b>Total:</b> ₹{result.get('total_price', 0)}\n"
+                    + payment_line
                 )
                 if result.get("customer_instructions"):
-                    msg += f"<b>Your instructions:</b> {result['customer_instructions']}\n"
+                    msg += f"📝 <b>Your instructions:</b> {result['customer_instructions']}\n"
                 if result.get("pickup_type") == "home_pickup":
-                    msg += f"<b>Pickup & delivery address:</b>\n{result.get('pickup_address') or address}\n"
-                    msg += "\nAgent will <b>pick up</b> from this address and <b>deliver back</b> when ready."
+                    msg += f"🏠 <b>Pickup & delivery:</b>\n{result.get('pickup_address') or address}\n"
+                    msg += "\n<i>We’ll pick up from here and deliver back when ready.</i>"
                     if result.get("is_express"):
                         msg += " Express: early pickup and drop."
                 else:
-                    msg += "\n<b>Drop-off:</b> You can drop your clothes/shoes at the outlet."
+                    msg += "\n📍 <b>Drop-off:</b> You can drop your clothes at the outlet."
                 if result.get("maintenance_note"):
                     msg += "\n\n⚠️ " + result["maintenance_note"]
-                msg += "\n\nUse <b>Track</b> or ask \"Where is my order?\" for updates."
-                msg += "\n\n⭐ <b>Rate your experience?</b> (optional) Reply with <b>1-5</b> or type <b>skip</b>."
+                msg += "\n\n━━━━━━━━━━━━━━━━━━━━\n"
+                msg += "📦 Use <b>Track</b> or ask <i>\"Where is my order?\"</i> for updates.\n\n"
+                msg += "⭐ <b>Rate your experience?</b> (optional) Reply <b>1–5</b> or <b>skip</b>."
                 _booking_state[chat_id] = {"step": "awaiting_rating", "order_id": result.get("order_id")}
                 return msg
             except Exception as e:
@@ -322,12 +392,16 @@ def handle_message(chat_id: str, text: str) -> str:
     # 2) /start
     if message == "/start" or message == "start":
         return (
-            "Welcome to <b>LaundryOps</b> 👕\n\n"
-            "1️⃣ <b>Book</b> – Schedule a pickup\n"
-            "2️⃣ <b>Track</b> – Check order status (send Order ID e.g. ORD-1234ABCD)\n"
-            "3️⃣ <b>Pricing</b> – Services and fees\n"
-            "4️⃣ <b>Support</b> – Policies and help\n\n"
-            "You can also ask: \"Where is my order?\" or \"Kitna time lagega?\""
+            "✨ <b>LaundryOps</b> ✨\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "👕 <i>Fresh clothes, zero hassle.</i>\n\n"
+            "🚀 <b>What would you like to do?</b>\n\n"
+            "📦 <b>Book</b> — Schedule a pickup & we’ll handle the rest\n"
+            "🔍 <b>Track</b> — Check status (send Order ID e.g. ORD-1234ABCD)\n"
+            "💰 <b>Pricing</b> — Services & fees\n"
+            "🛟 <b>Support</b> — Policies, FAQ & help\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "💬 Just type <b>Book</b>, <b>Track</b>, or ask: <i>\"Where is my order?\"</i>"
         )
 
     # 3) Order-related NL (before Book so "my order"/"my booking" don't start new book)
@@ -337,7 +411,11 @@ def handle_message(chat_id: str, text: str) -> str:
     # 4) Book intent → start flow (ask name first)
     if any(w in message for w in ("book", "pickup", "schedule", "order lagana", "laundry bhejo")):
         _booking_state[chat_id] = {"step": "name"}
-        return "Please send your <b>full name</b> to start the booking."
+        return (
+            _progress("name")
+            + "👋 <b>Let’s get your laundry sorted!</b>\n\n"
+            "📌 Send your <b>full name</b> to get started."
+        )
 
     # 5) Track by order number
     order_num = _extract_order_number(message, text)
@@ -347,31 +425,35 @@ def handle_message(chat_id: str, text: str) -> str:
             items_str = order.get("items_summary") or "—"
             delivery = order.get("delivery_time") or "—"
             return (
-                f"📦 Order <code>{order.get('order_number')}</code>\n"
-                f"Status: <b>{order.get('status', 'Unknown')}</b>\n"
-                f"Services: {items_str}\n"
-                f"Expected delivery: {delivery}\n"
-                f"Outlet: {order.get('outlet_name', '—')}"
+                "📦 <b>Order status</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                f"📌 <code>{order.get('order_number')}</code>\n"
+                f"📊 Status: <b>{order.get('status', 'Unknown')}</b>\n"
+                f"🧺 Services: {items_str}\n"
+                f"⏱ Expected: {delivery}\n"
+                f"🏪 Outlet: {order.get('outlet_name', '—')}"
             )
-        return f"Order <code>{order_num}</code> not found. Please check the ID."
+        return f"🔍 Order <code>{order_num}</code> not found. Double-check the ID or type <b>Book</b> to place a new order."
 
     # 6) Track without order number
     if any(w in message for w in ("track", "status", "where is my order", "kahan hai")):
         orders = get_orders_for_customer(chat_id, limit=1)
         if not orders:
-            return "Please send your <b>Order ID</b> (e.g. ORD-1234ABCD) to track, or type <b>Book</b> to schedule a pickup."
+            return "📦 Send your <b>Order ID</b> (e.g. ORD-1234ABCD) to track, or type <b>Book</b> to schedule a pickup."
         o = get_order_by_number(orders[0]["order_number"])
         if o:
             items_str = o.get("items_summary") or "—"
             delivery = o.get("delivery_time") or "—"
             return (
-                f"📦 Your latest order <code>{o.get('order_number')}</code>\n"
-                f"Status: <b>{o.get('status', 'Unknown')}</b>\n"
-                f"Services: {items_str}\n"
-                f"Expected delivery: {delivery}\n"
-                f"Outlet: {o.get('outlet_name', '—')}"
+                "📦 <b>Your latest order</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                f"📌 <code>{o.get('order_number')}</code>\n"
+                f"📊 Status: <b>{o.get('status', 'Unknown')}</b>\n"
+                f"🧺 Services: {items_str}\n"
+                f"⏱ Expected: {delivery}\n"
+                f"🏪 Outlet: {o.get('outlet_name', '—')}"
             )
-        return "Please send your Order ID (e.g. ORD-1234ABCD) to track."
+        return "📦 Send your <b>Order ID</b> (e.g. ORD-1234ABCD) to track."
 
     # 7) Pricing / support → RAG
     if any(w in message for w in ("price", "pricing", "cost", "fee", "support", "complaint", "policy", "faq", "rewash", "delivery time", "express")):
@@ -382,8 +464,11 @@ def handle_message(chat_id: str, text: str) -> str:
     if rag_reply and "don't have" not in rag_reply.lower() and "no specific" not in rag_reply.lower():
         return rag_reply
     return (
-        "You can: <b>Book</b>, <b>Track</b> (with Order ID), or ask about <b>pricing</b>/<b>support</b>. "
-        "Or ask: \"Where is my order?\", \"Kitna time lagega?\""
+        "💬 <b>Quick actions</b>\n\n"
+        "📦 <b>Book</b> — Schedule a pickup\n"
+        "🔍 <b>Track</b> — Send your Order ID\n"
+        "💰 <b>Pricing</b> / 🛟 <b>Support</b> — Just ask!\n\n"
+        "<i>Try: \"Where is my order?\" or \"Kitna time lagega?\"</i>"
     )
 
 

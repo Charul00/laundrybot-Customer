@@ -203,6 +203,9 @@ def estimate_price(service_choice: str, weight_kg: float, delivery_type: str) ->
         return None
 
 
+# Fake UPI ID for dev (no real payment integration yet)
+FAKE_UPI_ID = "laundryops@paytm"
+
 def create_booking(
     telegram_chat_id: str,
     full_name: str,
@@ -216,6 +219,7 @@ def create_booking(
     pickup_type: str = "self_drop",
     pickup_address: str = "",
     delivery_address: str = "",
+    payment_method: str = "cod",
 ) -> dict:
     """
     delivery_type: "express" | "standard"
@@ -225,6 +229,7 @@ def create_booking(
     customer_instructions: any other instructions from customer (e.g. delicate, no softener)
     pickup_type: "self_drop" (customer drops at outlet) | "home_pickup" (agent picks up and delivers back)
     pickup_address, delivery_address: exact location when home_pickup (required for express + home_pickup)
+    payment_method: "cod" | "upi" | "online" (fake for dev; no real integration yet)
     """
     supabase = get_supabase()
     phone_clean = "".join(c for c in phone if c.isdigit()).strip() or phone.strip()
@@ -317,6 +322,9 @@ def create_booking(
     pa = (pickup_address or "").strip() or None
     da = (delivery_address or "").strip() or None
 
+    payment_display = {"cod": "Cash on delivery", "upi": "UPI", "online": "Online"}.get(
+        (payment_method or "cod").strip().lower(), "Cash on delivery"
+    )
     order_payload = {
         "order_number": order_number,
         "customer_id": customer_id,
@@ -325,7 +333,7 @@ def create_booking(
         "status": "Received",
         "total_price": round(total_price, 2),
         "express_fee": round(express_fee, 2),
-        "payment_status": "pending",
+        "payment_status": payment_display,
         "delivery_time": delivery_estimate.isoformat(),
     }
     instructions_str = (customer_instructions or "").strip() or None
@@ -387,4 +395,5 @@ def create_booking(
         "is_express": is_express,
         "delivery_time_iso": delivery_estimate.isoformat(),
         "maintenance_note": maintenance_note,
+        "payment_method": (payment_method or "cod").strip().lower(),
     }
