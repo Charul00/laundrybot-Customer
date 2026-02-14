@@ -35,6 +35,62 @@ def _progress(step: str) -> str:
     n = _STEP_ORDER.get(step, 0)
     return f"🔄 <i>Step {n} of {_TOTAL_STEPS}</i>\n\n" if n else ""
 
+
+def _get_welcome_message() -> str:
+    """Creative welcome with services and quick actions (icons, engaging copy)."""
+    return (
+        "✨ <b>Welcome to LaundryOps!</b> ✨\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "👕 <i>Fresh clothes, zero hassle — we’re here for you.</i>\n\n"
+        "🧺 <b>What we do</b>\n"
+        "• Wash only · Wash + Iron · Dry clean · Shoe clean\n"
+        "• 🚚 Pickup & delivery or you drop at our outlet\n"
+        "• ⚡ Standard (48 hrs) or Express (24 hrs)\n\n"
+        "🚀 <b>What would you like to do?</b>\n\n"
+        "📦 <b>Book</b> — Schedule a pickup, we’ll handle the rest\n"
+        "🔍 <b>Track</b> — Check status (Order ID e.g. ORD-1234ABCD)\n"
+        "💰 <b>Pricing</b> — Services & fees\n"
+        "🛟 <b>Support</b> — Policies, FAQ & help\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "💬 Just type <b>Book</b>, <b>Track</b>, or ask: <i>\"Where is my order?\"</i>"
+    )
+
+
+def _is_greeting_or_casual(message: str) -> bool:
+    """True if message looks like a greeting or casual chat (hi, hello, how are you, what are you doing, etc.)."""
+    m = message.strip().lower()
+    if not m or len(m) > 120:
+        return False
+    greetings = (
+        "hi", "hello", "hey", "hii", "heyy", "helo", "hallo", "hi there", "hey there",
+        "good morning", "good evening", "good afternoon", "gm", "ge", "ga",
+        "namaste", "namaskar", "sup", "yo", "hola",
+    )
+    if m in greetings or m.rstrip("!?.") in greetings:
+        return True
+    casual = (
+        "how are you", "how r u", "how ru", "what are you doing", "what do you do",
+        "what can you do", "tell me about you", "who are you", "who r u",
+        "kya kar rahe ho", "kaise ho", "aap kya karte ho", "help", "intro",
+        "what is this", "what's this", "ye kya hai", "start", "begin",
+    )
+    return any(c in m for c in casual)
+
+
+def _reply_to_greeting_or_casual(message: str) -> str:
+    """Short friendly reply line (optional) + welcome. Makes the bot feel conversational."""
+    m = message.strip().lower()
+    if any(x in m for x in ("hi", "hello", "hey", "hii", "heyy", "namaste", "gm", "ge", "ga")):
+        return "Hey! 👋 Great to hear from you.\n\n" + _get_welcome_message()
+    if any(x in m for x in ("how are you", "how r u", "kaise ho", "how ru")):
+        return "I’m doing great, thanks for asking! 😊 Ready to help with your laundry.\n\n" + _get_welcome_message()
+    if any(x in m for x in ("what are you doing", "what do you do", "kya kar rahe ho", "what can you do", "tell me about", "who are you")):
+        return "I’m your laundry buddy! 🧺 Here to help you book pickups, track orders, and get fresh clothes back.\n\n" + _get_welcome_message()
+    if any(x in m for x in ("help", "intro", "what is this", "ye kya hai", "start", "begin")):
+        return "Sure, here’s what I can do for you —\n\n" + _get_welcome_message()
+    return _get_welcome_message()
+
+
 # Rough weight per item (kg) when customer gives pieces instead of kg
 _WEIGHT_PER_SHIRT = 0.2
 _WEIGHT_PER_PANT = 0.25
@@ -389,26 +445,19 @@ def handle_message(chat_id: str, text: str) -> str:
                     )
                 return f"Sorry, we couldn't create the booking. Please try again or contact the outlet. ({err[:60]})"
 
-    # 2) /start
+    # 2) /start → full welcome (services + quick actions)
     if message == "/start" or message == "start":
-        return (
-            "✨ <b>LaundryOps</b> ✨\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "👕 <i>Fresh clothes, zero hassle.</i>\n\n"
-            "🚀 <b>What would you like to do?</b>\n\n"
-            "📦 <b>Book</b> — Schedule a pickup & we’ll handle the rest\n"
-            "🔍 <b>Track</b> — Check status (send Order ID e.g. ORD-1234ABCD)\n"
-            "💰 <b>Pricing</b> — Services & fees\n"
-            "🛟 <b>Support</b> — Policies, FAQ & help\n\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "💬 Just type <b>Book</b>, <b>Track</b>, or ask: <i>\"Where is my order?\"</i>"
-        )
+        return _get_welcome_message()
 
-    # 3) Order-related NL (before Book so "my order"/"my booking" don't start new book)
+    # 3) Greetings & casual chat (hi, hello, how are you, what can you do, etc.) → friendly reply + welcome
+    if _is_greeting_or_casual(message):
+        return _reply_to_greeting_or_casual(message)
+
+    # 4) Order-related NL (before Book so "my order"/"my booking" don't start new book)
     if _is_order_related(message):
         return answer_order_query(chat_id, text)
 
-    # 4) Book intent → start flow (ask name first)
+    # 5) Book intent → start flow (ask name first)
     if any(w in message for w in ("book", "pickup", "schedule", "order lagana", "laundry bhejo")):
         _booking_state[chat_id] = {"step": "name"}
         return (
@@ -417,7 +466,7 @@ def handle_message(chat_id: str, text: str) -> str:
             "📌 Send your <b>full name</b> to get started."
         )
 
-    # 5) Track by order number
+    # 6) Track by order number
     order_num = _extract_order_number(message, text)
     if order_num:
         order = get_order_by_number(order_num)
@@ -435,7 +484,7 @@ def handle_message(chat_id: str, text: str) -> str:
             )
         return f"🔍 Order <code>{order_num}</code> not found. Double-check the ID or type <b>Book</b> to place a new order."
 
-    # 6) Track without order number
+    # 7) Track without order number
     if any(w in message for w in ("track", "status", "where is my order", "kahan hai")):
         orders = get_orders_for_customer(chat_id, limit=1)
         if not orders:
@@ -455,20 +504,20 @@ def handle_message(chat_id: str, text: str) -> str:
             )
         return "📦 Send your <b>Order ID</b> (e.g. ORD-1234ABCD) to track."
 
-    # 7) Pricing / support → RAG
+    # 8) Pricing / support → RAG
     if any(w in message for w in ("price", "pricing", "cost", "fee", "support", "complaint", "policy", "faq", "rewash", "delivery time", "express")):
         return answer_with_rag(text)
 
-    # 8) Default: try RAG for general questions, else menu
+    # 9) Default: try RAG for general questions, else engaging menu
     rag_reply = answer_with_rag(text)
     if rag_reply and "don't have" not in rag_reply.lower() and "no specific" not in rag_reply.lower():
         return rag_reply
     return (
-        "💬 <b>Quick actions</b>\n\n"
+        "💬 I’m not sure I got that — but I’m here to help!\n\n"
         "📦 <b>Book</b> — Schedule a pickup\n"
         "🔍 <b>Track</b> — Send your Order ID\n"
         "💰 <b>Pricing</b> / 🛟 <b>Support</b> — Just ask!\n\n"
-        "<i>Try: \"Where is my order?\" or \"Kitna time lagega?\"</i>"
+        "<i>Try: \"Hi\", \"Book\", \"Where is my order?\" or \"Kitna time lagega?\"</i>"
     )
 
 
