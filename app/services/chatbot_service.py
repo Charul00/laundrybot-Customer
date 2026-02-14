@@ -22,12 +22,14 @@ from app.services.nl_query_service import answer_order_query
 # state: name, address, phone, delivery_type, service_choice, step, weight_kg, weight_note, customer_instructions
 _booking_state: dict = {}
 
-# Step order for progress hint in booking flow (1–10)
+# Step order for progress hint in booking flow (1–12)
 _STEP_ORDER = {
     "name": 1, "address": 2, "phone": 3, "delivery": 4, "service": 5,
-    "weight": 6, "pickup_type": 7, "home_address": 8, "instructions": 9, "payment": 10,
+    "weight": 6, "pickup_type": 7, "home_address": 8,
+    "pickup_datetime": 9, "delivery_datetime": 10,
+    "instructions": 11, "payment": 12,
 }
-_TOTAL_STEPS = 10
+_TOTAL_STEPS = 12
 
 
 def _progress(step: str) -> str:
@@ -43,7 +45,7 @@ def _get_welcome_message() -> str:
         "━━━━━━━━━━━━━━━━━━━━\n"
         "👕 <i>Fresh clothes, zero hassle — we’re here for you.</i>\n\n"
         "🧺 <b>What we do</b>\n"
-        "• Wash only · Wash + Iron · Dry clean · Shoe clean\n"
+        "• Wash · Wash+Iron · Dry clean · Shoe · Home textiles (bedsheet, carpet, curtains) · Premium/Press/Steam iron\n"
         "• 🚚 Pickup & delivery or you drop at our outlet\n"
         "• ⚡ Standard (48 hrs) or Express (24 hrs)\n\n"
         "🚀 <b>What would you like to do?</b>\n\n"
@@ -246,11 +248,18 @@ def handle_message(chat_id: str, text: str) -> str:
                 "• <b>1</b> — Wash only\n"
                 "• <b>2</b> — Wash + Iron\n"
                 "• <b>3</b> — Dry clean\n"
-                "• <b>4</b> — Shoe clean\n\n"
-                "Reply with <b>1</b>, <b>2</b>, <b>3</b>, or <b>4</b>."
+                "• <b>4</b> — Shoe clean\n"
+                "• <b>5</b> — Home textiles (bedsheet, carpet, curtains)\n"
+                "• <b>6</b> — Premium ironing\n"
+                "• <b>7</b> — Press iron\n"
+                "• <b>8</b> — Steam iron\n\n"
+                "Reply with <b>1</b>–<b>8</b>."
             )
         if step == "service":
-            choice_map = {"1": "wash_only", "2": "wash_iron", "3": "dry_clean", "4": "shoe_clean"}
+            choice_map = {
+                "1": "wash_only", "2": "wash_iron", "3": "dry_clean", "4": "shoe_clean",
+                "5": "home_textiles", "6": "premium_iron", "7": "press_iron", "8": "steam_iron",
+            }
             state["service_choice"] = choice_map.get(message, "wash_only")
             state["step"] = "weight"
             _booking_state[chat_id] = state
@@ -310,12 +319,12 @@ def handle_message(chat_id: str, text: str) -> str:
                     + "🏠 <b>Pickup & delivery address</b>\n\n"
                     "Send your <b>full address</b>. We’ll pick up from here and deliver back when ready."
                 )
-            state["step"] = "instructions"
+            state["step"] = "pickup_datetime"
             _booking_state[chat_id] = state
             return (
-                _progress("instructions")
-                + "📝 <b>Any special instructions?</b>\n\n"
-                "e.g. delicate, no softener, folding preference — or type <b>no</b> / <b>none</b> to skip."
+                _progress("pickup_datetime")
+                + "📅 <b>Preferred date & time to drop off at outlet?</b>\n\n"
+                "e.g. Tomorrow 10am, or 15 Feb 2–4pm — type your preferred slot."
             )
         if step == "home_address":
             home_addr = raw.strip() if raw.strip() else ""
@@ -324,12 +333,37 @@ def handle_message(chat_id: str, text: str) -> str:
                 return _progress("home_address") + "🏠 Please send your full address for pickup and delivery."
             state["pickup_address"] = home_addr
             state["delivery_address"] = home_addr
+            state["step"] = "pickup_datetime"
+            _booking_state[chat_id] = state
+            return (
+                _progress("pickup_datetime")
+                + "📅 <b>Preferred pickup date & time?</b>\n\n"
+                "When should we pick up from your address? e.g. Tomorrow 10am, or 15 Feb 2–4pm."
+            )
+        if step == "pickup_datetime":
+            state["preferred_pickup_at"] = (raw or "").strip() or ""
+            state["step"] = "delivery_datetime"
+            _booking_state[chat_id] = state
+            pickup_type = state.get("pickup_type", "self_drop")
+            if pickup_type == "home_pickup":
+                return (
+                    _progress("delivery_datetime")
+                    + "📅 <b>Preferred delivery date & time?</b>\n\n"
+                    "When should we deliver back? e.g. Day after 6pm, or 16 Feb 10am–12pm."
+                )
+            return (
+                _progress("delivery_datetime")
+                + "📅 <b>Preferred date & time to pick up from outlet?</b>\n\n"
+                "When will you collect? e.g. 17 Feb 11am, or Saturday 2–4pm."
+            )
+        if step == "delivery_datetime":
+            state["preferred_delivery_at"] = (raw or "").strip() or ""
             state["step"] = "instructions"
             _booking_state[chat_id] = state
             return (
                 _progress("instructions")
                 + "📝 <b>Any special instructions?</b>\n\n"
-                "e.g. delicate, no softener — or type <b>no</b> / <b>none</b> to skip."
+                "e.g. delicate, no softener, folding preference — or type <b>no</b> / <b>none</b> to skip."
             )
         if step == "instructions":
             instructions = raw.strip() if raw.strip() else ""
@@ -371,6 +405,8 @@ def handle_message(chat_id: str, text: str) -> str:
             pickup_type = state.get("pickup_type", "self_drop")
             pickup_address = state.get("pickup_address", "") if pickup_type == "home_pickup" else ""
             delivery_address = state.get("delivery_address", "") if pickup_type == "home_pickup" else ""
+            preferred_pickup_at = (state.get("preferred_pickup_at") or "").strip() or None
+            preferred_delivery_at = (state.get("preferred_delivery_at") or "").strip() or None
             try:
                 result = create_booking(
                     chat_id,
@@ -386,6 +422,8 @@ def handle_message(chat_id: str, text: str) -> str:
                     pickup_address=pickup_address,
                     delivery_address=delivery_address,
                     payment_method=payment_method,
+                    preferred_pickup_at=preferred_pickup_at,
+                    preferred_delivery_at=preferred_delivery_at,
                 )
                 if result.get("error") == "setup":
                     return result.get("message", "Please run the Supabase migration (see docs).")
@@ -424,11 +462,19 @@ def handle_message(chat_id: str, text: str) -> str:
                     msg += f"📝 <b>Your instructions:</b> {result['customer_instructions']}\n"
                 if result.get("pickup_type") == "home_pickup":
                     msg += f"🏠 <b>Pickup & delivery:</b>\n{result.get('pickup_address') or address}\n"
+                    if result.get("preferred_pickup_at"):
+                        msg += f"📅 <b>Preferred pickup:</b> {result['preferred_pickup_at']}\n"
+                    if result.get("preferred_delivery_at"):
+                        msg += f"📅 <b>Preferred delivery:</b> {result['preferred_delivery_at']}\n"
                     msg += "\n<i>We’ll pick up from here and deliver back when ready.</i>"
                     if result.get("is_express"):
                         msg += " Express: early pickup and drop."
                 else:
                     msg += "\n📍 <b>Drop-off:</b> You can drop your clothes at the outlet."
+                    if result.get("preferred_pickup_at"):
+                        msg += f"\n📅 <b>Preferred drop-off:</b> {result['preferred_pickup_at']}"
+                    if result.get("preferred_delivery_at"):
+                        msg += f"\n📅 <b>Preferred pick-up from outlet:</b> {result['preferred_delivery_at']}"
                 if result.get("maintenance_note"):
                     msg += "\n\n⚠️ " + result["maintenance_note"]
                 msg += "\n\n━━━━━━━━━━━━━━━━━━━━\n"

@@ -14,6 +14,10 @@ SERVICE_MAP = {
     "wash_iron": ["wash", "iron"],
     "dry_clean": ["dry_clean"],
     "shoe_clean": ["shoe_clean"],
+    "home_textiles": ["home_textiles"],  # bedsheet, carpet, curtains
+    "premium_iron": ["premium_iron"],     # premium care ironing
+    "press_iron": ["press_iron"],         # press iron
+    "steam_iron": ["steam_iron"],         # steam iron
 }
 
 
@@ -220,10 +224,12 @@ def create_booking(
     pickup_address: str = "",
     delivery_address: str = "",
     payment_method: str = "cod",
+    preferred_pickup_at: Optional[str] = None,
+    preferred_delivery_at: Optional[str] = None,
 ) -> dict:
     """
     delivery_type: "express" | "standard"
-    service_choice: "wash_only" | "wash_iron" | "dry_clean" | "shoe_clean"
+    service_choice: "wash_only" | "wash_iron" | "dry_clean" | "shoe_clean" | "home_textiles" | "premium_iron" | "press_iron" | "steam_iron"
     weight_kg: total clothes weight in kg; price = weight_kg × sum(rate per kg for selected services)
     weight_note: when weight was estimated from pieces, e.g. "5 shirts, 2 pants"
     customer_instructions: any other instructions from customer (e.g. delicate, no softener)
@@ -338,6 +344,8 @@ def create_booking(
     }
     instructions_str = (customer_instructions or "").strip() or None
     weight_note_str = (weight_note or "").strip() or None
+    preferred_pickup = (preferred_pickup_at or "").strip() or None
+    preferred_delivery = (preferred_delivery_at or "").strip() or None
     order_payload_ext = {
         **order_payload,
         "pickup_type": pt,
@@ -346,12 +354,14 @@ def create_booking(
         "total_weight_kg": round(weight_kg, 2),
         "customer_instructions": instructions_str,
         "weight_note": weight_note_str,
+        "preferred_pickup_at": preferred_pickup,
+        "preferred_delivery_at": preferred_delivery,
     }
     try:
         order_ins = supabase.table("orders").insert(order_payload_ext).execute()
     except Exception:
         fallback = {k: v for k, v in order_payload_ext.items()
-                    if k not in ("total_weight_kg", "customer_instructions", "weight_note")}
+                    if k not in ("total_weight_kg", "customer_instructions", "weight_note", "preferred_pickup_at", "preferred_delivery_at")}
         try:
             order_ins = supabase.table("orders").insert(fallback).execute()
         except Exception:
@@ -396,4 +406,6 @@ def create_booking(
         "delivery_time_iso": delivery_estimate.isoformat(),
         "maintenance_note": maintenance_note,
         "payment_method": (payment_method or "cod").strip().lower(),
+        "preferred_pickup_at": preferred_pickup,
+        "preferred_delivery_at": preferred_delivery,
     }
