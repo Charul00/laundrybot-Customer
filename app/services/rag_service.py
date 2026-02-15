@@ -51,7 +51,9 @@ def _get_fallback_context() -> str:
         return ""
 
 
-def _answer_with_fallback_context(context: str, user_message: str) -> str:
+def _answer_with_fallback_context(
+    context: str, user_message: str, conversation_history: str = ""
+) -> str:
     """Use fallback context with LLM when RAG retriever returned empty."""
     if not OPENAI_API_KEY or not context.strip():
         return (
@@ -65,12 +67,22 @@ def _answer_with_fallback_context(context: str, user_message: str) -> str:
                 "system",
                 "You are a LaundryOps assistant. Answer only from the context. "
                 "When the user asks for pricing (wash only, wash+iron, dry clean, shoe clean), include the exact Rs amounts from the context. "
+                "If there is recent conversation, use it to understand follow-up questions (e.g. 'and express?', 'same for dry clean?'). "
                 "Keep reply clear and short (2-5 lines for pricing questions).",
             ),
-            ("human", "Context:\n{context}\n\nQuestion: {input}"),
+            (
+                "human",
+                "Context:\n{context}\n\n"
+                "Recent conversation (for follow-up context):\n{conversation_history}\n\n"
+                "Current question: {input}",
+            ),
         ])
         chain = prompt | llm | StrOutputParser()
-        out = chain.invoke({"context": context, "input": user_message})
+        out = chain.invoke({
+            "context": context,
+            "input": user_message,
+            "conversation_history": conversation_history.strip() or "(none)",
+        })
         return (out or "").strip()
     except Exception:
         return (
@@ -121,11 +133,12 @@ def _get_pricing_reply() -> str:
     return pricing_part
 
 
-def answer_with_rag(user_message: str) -> str:
+def answer_with_rag(user_message: str, conversation_history: str = "") -> str:
     """
     LangChain RAG: retrieve relevant FAQ/policy chunks, then generate answer with LLM.
     If retriever returns no context, use fallback (services + faq content from DB).
     When user asks just 'Pricing' or 'price', return full pricing list directly.
+    conversation_history: recent "User: ...\\nAssistant: ..." for follow-up context.
     """
     msg_lower = (user_message or "").strip().lower()
     if msg_lower in ("pricing", "price", "prices", "rate", "rates") or msg_lower in ("all prices", "all services price", "what are the prices"):
@@ -149,11 +162,11 @@ def answer_with_rag(user_message: str) -> str:
                 "We offer Wash, Dry Clean, Iron, and Shoe cleaning. "
                 "Express has an extra fee. For pricing and support, please visit our outlet or ask for a quote."
             )
-        return _answer_with_fallback_context(context, user_message)
+        return _answer_with_fallback_context(context, user_message, conversation_history)
     except Exception:
         fallback = _get_fallback_context()
         if fallback:
-            return _answer_with_fallback_context(fallback, user_message)
+            return _answer_with_fallback_context(fallback, user_message, conversation_history)
         return (
             "We offer Wash, Dry Clean, Iron, and Shoe cleaning. Express has an extra fee. "
             "For pricing and support, please visit our outlet or try again later."

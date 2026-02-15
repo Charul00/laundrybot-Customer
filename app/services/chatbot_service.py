@@ -18,6 +18,11 @@ from app.services.booking_service import (
 from app.services.tracking_service import get_order_by_number, get_orders_for_customer
 from app.services.rag_service import answer_with_rag
 from app.services.nl_query_service import answer_order_query
+from app.services.conversation_memory import (
+    append as memory_append,
+    get_formatted_history as get_memory_history,
+    clear as memory_clear,
+)
 
 # state: name, address, phone, delivery_type, service_choice, step, weight_kg, weight_note, customer_instructions
 _booking_state: dict = {}
@@ -146,8 +151,14 @@ def _parse_weight_from_message(raw: str) -> Tuple[Optional[float], Optional[str]
 
 
 def handle_message(chat_id: str, text: str) -> str:
-    message = (text or "").strip().lower()
     raw = (text or "").strip()
+    reply = _handle_message_impl(chat_id, text, raw)
+    memory_append(chat_id, raw, reply)
+    return reply
+
+
+def _handle_message_impl(chat_id: str, text: str, raw: str) -> str:
+    message = (raw or "").strip().lower()
 
     # 0) Optional rating after booking (reply 1-5 or skip)
     state = _booking_state.get(chat_id)
@@ -481,8 +492,9 @@ def handle_message(chat_id: str, text: str) -> str:
                     )
                 return f"Sorry, we couldn't create the booking. Please try again or contact the outlet. ({err[:60]})"
 
-    # 2) /start → full welcome (services + quick actions)
+    # 2) /start → full welcome (services + quick actions); clear conversation memory for fresh context
     if message == "/start" or message == "start":
+        memory_clear(chat_id)
         return _get_welcome_message()
 
     # 3) Greetings & casual chat (hi, hello, how are you, what can you do, etc.) → friendly reply + welcome
@@ -491,7 +503,7 @@ def handle_message(chat_id: str, text: str) -> str:
 
     # 4) Order-related NL (before Book so "my order"/"my booking" don't start new book)
     if _is_order_related(message):
-        return answer_order_query(chat_id, text)
+        return answer_order_query(chat_id, text, conversation_history=get_memory_history(chat_id))
 
     # 5) Book intent → start flow (ask name first)
     if any(w in message for w in ("book", "pickup", "schedule", "order lagana", "laundry bhejo")):
@@ -540,12 +552,12 @@ def handle_message(chat_id: str, text: str) -> str:
             )
         return "📦 Send your <b>Order ID</b> (e.g. ORD-1234ABCD) to track."
 
-    # 8) Pricing / support → RAG
+    # 8) Pricing / support → RAG (with conversation memory for follow-ups)
     if any(w in message for w in ("price", "pricing", "cost", "fee", "support", "complaint", "policy", "faq", "rewash", "delivery time", "express")):
-        return answer_with_rag(text)
+        return answer_with_rag(text, conversation_history=get_memory_history(chat_id))
 
     # 9) Default: try RAG for general questions, else engaging menu
-    rag_reply = answer_with_rag(text)
+    rag_reply = answer_with_rag(text, conversation_history=get_memory_history(chat_id))
     if rag_reply and "don't have" not in rag_reply.lower() and "no specific" not in rag_reply.lower():
         return rag_reply
     return (

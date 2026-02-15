@@ -34,22 +34,25 @@ def _format_order_plain(order: dict) -> str:
 
 
 def _get_order_reply_chain():
-    """LangChain chain: order_data + user_message -> natural language reply."""
+    """LangChain chain: order_data + user_message [+ optional conversation] -> natural language reply."""
     prompt = ChatPromptTemplate.from_messages([
         (
             "system",
             "You are a friendly LaundryOps assistant. The user asked about their order. "
             "Give a clear update: status, services, expected delivery, outlet. "
             "Use only the order data below. Reply in 1-3 short sentences. "
+            "If recent conversation is provided, use it to interpret follow-ups (e.g. 'what about the other one?' = another order). "
             "If they asked in Hindi/Hinglish, you may reply in the same tone.",
         ),
-        ("human", "Order data:\n{order_data}\n\nUser asked: {user_message}"),
+        ("human", "Order data:\n{order_data}\n\n{conversation_block}User asked: {user_message}"),
     ])
     llm = ChatOpenAI(model="gpt-4o-mini", max_tokens=120, api_key=OPENAI_API_KEY)
     return prompt | llm | StrOutputParser()
 
 
-def answer_order_query(telegram_chat_id: str, user_message: str) -> str:
+def answer_order_query(
+    telegram_chat_id: str, user_message: str, conversation_history: str = ""
+) -> str:
     """
     Resolve which order (by order number in message, or customer's recent orders),
     fetch from DB, then use LangChain chain to generate a natural-language reply.
@@ -92,10 +95,17 @@ def answer_order_query(telegram_chat_id: str, user_message: str) -> str:
         f"outlet={o.get('outlet_name')}, total_price={o.get('total_price')}"
         for o in orders_data
     )
+    conversation_block = ""
+    if conversation_history and conversation_history.strip():
+        conversation_block = "Recent conversation (for context):\n" + conversation_history.strip() + "\n\n"
 
     try:
         chain = _get_order_reply_chain()
-        reply = chain.invoke({"order_data": data_summary, "user_message": user_message})
+        reply = chain.invoke({
+            "order_data": data_summary,
+            "user_message": user_message,
+            "conversation_block": conversation_block,
+        })
         return (reply or _format_order_plain(orders_data[0])).strip()
     except Exception:
         return _format_order_plain(orders_data[0])
