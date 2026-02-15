@@ -21,6 +21,7 @@ from app.services.nl_query_service import answer_order_query
 from app.services.conversation_memory import (
     append as memory_append,
     get_formatted_history as get_memory_history,
+    get_user_questions as get_memory_user_questions,
     clear as memory_clear,
 )
 
@@ -86,6 +87,40 @@ def _reply_to_greeting_or_casual(message: str) -> str:
     if any(x in m for x in ("help", "intro", "what is this", "ye kya hai", "start", "begin")):
         return "Sure, here’s what I can do for you —\n\n" + _get_welcome_message()
     return _get_welcome_message()
+
+
+def _is_show_my_questions_intent(message: str) -> bool:
+    """True if user wants to see what they asked (recent questions from memory)."""
+    m = message.strip().lower()
+    if not m or len(m) > 80:
+        return False
+    phrases = (
+        "what did i ask", "what did i say", "my questions", "show my questions",
+        "my messages", "show my messages", "conversation history", "my history",
+        "what questions did i ask", "list my questions", "maine kya pucha",
+        "mera kya question tha", "jo maine pucha", "my recent questions",
+    )
+    return any(p in m for p in phrases)
+
+
+def _reply_with_recent_questions(chat_id: str) -> str:
+    """Format recent user questions from conversation memory for display."""
+    questions = get_memory_user_questions(chat_id)
+    if not questions:
+        return (
+            "📋 <b>Your recent questions</b>\n\n"
+            "No questions in this chat yet — or you just said <b>/start</b> and we cleared the history.\n\n"
+            "Ask me anything (e.g. pricing, track, book) and then ask <i>\"What did I ask?\"</i> to see your questions here."
+        )
+    lines = []
+    for i, q in enumerate(questions, 1):
+        q_short = (q[:80] + "…") if len(q) > 80 else q
+        lines.append(f"{i}. {q_short}")
+    return (
+        "📋 <b>Questions you asked in this chat</b>\n\n"
+        + "\n".join(lines)
+        + "\n\n<i>This is from our recent conversation. Say /start to clear and start fresh.</i>"
+    )
 
 
 # Rough weight per item (kg) when customer gives pieces instead of kg
@@ -500,6 +535,10 @@ def _handle_message_impl(chat_id: str, text: str, raw: str) -> str:
     # 3) Greetings & casual chat (hi, hello, how are you, what can you do, etc.) → friendly reply + welcome
     if _is_greeting_or_casual(message):
         return _reply_to_greeting_or_casual(message)
+
+    # 3b) "What did I ask?" / "My questions" → show recent questions from conversation memory
+    if _is_show_my_questions_intent(message):
+        return _reply_with_recent_questions(chat_id)
 
     # 4) Order-related NL (before Book so "my order"/"my booking" don't start new book)
     if _is_order_related(message):

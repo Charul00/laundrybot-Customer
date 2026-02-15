@@ -55,6 +55,13 @@ def append(chat_id: str, user_message: str, assistant_reply: str) -> None:
         buf.pop(0)
 
 
+def get_user_questions(chat_id: str, max_items: int = 10) -> List[str]:
+    """Return the list of recent questions/messages the user sent (oldest first)."""
+    buf = get_recent_history(chat_id)
+    user_msgs = [m.get("content", "").strip() for m in buf if m.get("role") == "user" and (m.get("content") or "").strip()]
+    return user_msgs[-max_items:] if len(user_msgs) > max_items else user_msgs
+
+
 def clear(chat_id: str) -> None:
     """Clear conversation history for this chat (e.g. after /start if you want a fresh context)."""
     _conversation_buffer.pop(chat_id, None)
