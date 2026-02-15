@@ -22,20 +22,10 @@ from app.services.nl_query_service import answer_order_query
 # state: name, address, phone, delivery_type, service_choice, step, weight_kg, weight_note, customer_instructions
 _booking_state: dict = {}
 
-# Step order for progress hint in booking flow (1–12)
-_STEP_ORDER = {
-    "name": 1, "address": 2, "phone": 3, "delivery": 4, "service": 5,
-    "weight": 6, "pickup_type": 7, "home_address": 8,
-    "pickup_datetime": 9, "delivery_datetime": 10,
-    "instructions": 11, "payment": 12,
-}
-_TOTAL_STEPS = 12
 
-
-def _progress(step: str) -> str:
-    """Return a short progress line for the given step (e.g. 'Step 2 of 10')."""
-    n = _STEP_ORDER.get(step, 0)
-    return f"🔄 <i>Step {n} of {_TOTAL_STEPS}</i>\n\n" if n else ""
+def _progress(_step: str) -> str:
+    """Return empty string. Do not add step progress (e.g. 'Step 1 of 12') to any message."""
+    return ""
 
 
 def _get_welcome_message() -> str:
