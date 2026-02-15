@@ -127,6 +127,8 @@ def _reply_with_recent_questions(chat_id: str) -> str:
 _WEIGHT_PER_SHIRT = 0.2
 _WEIGHT_PER_PANT = 0.25
 _WEIGHT_PER_PIECE = 0.2
+_WEIGHT_PER_SHOE_PAIR = 0.5
+_WEIGHT_PER_IRON_PIECE = 0.2
 
 
 def _parse_weight_from_message(raw: str) -> Tuple[Optional[float], Optional[str]]:
@@ -183,6 +185,71 @@ def _parse_weight_from_message(raw: str) -> Tuple[Optional[float], Optional[str]
         parts.append(f"{pieces_generic} piece{'s' if pieces_generic != 1 else ''}")
     weight_note = ", ".join(parts) if parts else None
     return (total_kg, weight_note)
+
+
+def _parse_quantity(raw: str, min_val: int = 1, max_val: int = 100) -> Optional[int]:
+    """Parse a positive integer from message (e.g. '3', '5 pairs', '10'). Returns None if invalid or out of range."""
+    if not (raw or "").strip():
+        return None
+    s = (raw or "").strip()
+    m = re.search(r"(\d+)", s)
+    if not m:
+        return None
+    try:
+        n = int(m.group(1))
+        if min_val <= n <= max_val:
+            return n
+    except ValueError:
+        pass
+    return None
+
+
+def _parse_home_textiles_weight(raw: str, textile_type: str) -> Tuple[Optional[float], Optional[str]]:
+    """Parse home textiles: '2 bedsheets', '1 carpet', '3 curtains' or plain weight '3' (kg). Returns (weight_kg, note)."""
+    s = (raw or "").strip().lower()
+    # Plain number = weight in kg
+    m = re.search(r"^(\d+(?:\.\d+)?)\s*kg?$", s)
+    if m:
+        try:
+            w = float(m.group(1))
+            if 0.5 <= w <= 100:
+                return (round(w, 2), f"{w} kg")
+        except ValueError:
+            pass
+    # "2" alone = 2 kg or 2 items depending on type
+    m = re.search(r"^(\d+)$", s)
+    if m:
+        try:
+            n = int(m.group(1))
+            if n < 1 or n > 100:
+                return (None, None)
+            # Approximate: 1 bedsheet ~1 kg, 1 carpet ~3 kg, 1 curtain ~0.5 kg
+            if textile_type == "bedsheet":
+                return (round(n * 1.0, 2), f"{n} bedsheet{'s' if n != 1 else ''}")
+            if textile_type == "carpet":
+                return (round(n * 3.0, 2), f"{n} carpet{'s' if n != 1 else ''}")
+            if textile_type == "curtains":
+                return (round(n * 0.5, 2), f"{n} curtain{'s' if n != 1 else ''}")
+            return (round(n * 1.0, 2), f"{n} item{'s' if n != 1 else ''}")
+        except ValueError:
+            pass
+    # "2 bedsheets", "1 carpet", "3 curtains"
+    for pattern, label, kg_each in [
+        (r"(\d+)\s*bedsheets?", "bedsheet", 1.0),
+        (r"(\d+)\s*carpets?", "carpet", 3.0),
+        (r"(\d+)\s*curtains?", "curtain", 0.5),
+    ]:
+        m = re.search(pattern, s)
+        if m:
+            try:
+                n = int(m.group(1))
+                if 1 <= n <= 100:
+                    w = round(n * kg_each, 2)
+                    note = f"{n} {label}{'s' if n != 1 else ''}"
+                    return (max(0.5, w), note)
+            except ValueError:
+                pass
+    return (None, None)
 
 
 def handle_message(chat_id: str, text: str) -> str:
@@ -297,8 +364,34 @@ def _handle_message_impl(chat_id: str, text: str, raw: str) -> str:
                 "5": "home_textiles", "6": "premium_iron", "7": "press_iron", "8": "steam_iron",
             }
             state["service_choice"] = choice_map.get(message, "wash_only")
-            state["step"] = "weight"
             _booking_state[chat_id] = state
+            # Dynamic next step based on service
+            if state["service_choice"] == "shoe_clean":
+                state["step"] = "shoe_quantity"
+                return (
+                    _progress("shoe_quantity")
+                    + "👟 <b>Shoe clean</b> — How many <b>pairs of shoes</b>?\n\n"
+                    "Reply with a number (e.g. 1, 2, 5). We charge per pair."
+                )
+            if state["service_choice"] == "home_textiles":
+                state["step"] = "home_textiles_type"
+                return (
+                    _progress("home_textiles_type")
+                    + "🛏️ <b>Home textiles</b> — What type?\n\n"
+                    "• <b>1</b> — Bedsheet / bedsheets\n"
+                    "• <b>2</b> — Carpet / rug\n"
+                    "• <b>3</b> — Curtains\n\n"
+                    "Reply with <b>1</b>, <b>2</b>, or <b>3</b>."
+                )
+            if state["service_choice"] in ("premium_iron", "press_iron", "steam_iron"):
+                state["step"] = "iron_quantity"
+                return (
+                    _progress("iron_quantity")
+                    + "👔 <b>Ironing</b> — How many <b>pieces</b> to iron?\n\n"
+                    "Reply with a number (e.g. 5, 10) or <b>weight in kg</b> (e.g. 2 kg)."
+                )
+            # wash_only, wash_iron, dry_clean → ask weight
+            state["step"] = "weight"
             return (
                 _progress("weight")
                 + "⚖️ <b>How much laundry?</b>\n\n"
@@ -307,10 +400,87 @@ def _handle_message_impl(chat_id: str, text: str, raw: str) -> str:
                 "• <b>8 pieces</b> or <b>10 clothes</b>\n\n"
                 "<i>We’ll estimate weight and show your bill.</i>"
             )
+        if step == "shoe_quantity":
+            qty = _parse_quantity(raw, min_val=1, max_val=20)
+            if qty is None:
+                _booking_state[chat_id] = state
+                return (
+                    _progress("shoe_quantity")
+                    + "👟 How many <b>pairs of shoes</b>? Reply with a number (1–20)."
+                )
+            state["weight_kg"] = round(qty * _WEIGHT_PER_SHOE_PAIR, 2)
+            state["weight_note"] = f"{qty} pair{'s' if qty != 1 else ''} of shoes"
+            state["step"] = "pickup_type"
+            _booking_state[chat_id] = state
+            total_bill = estimate_price(
+                state.get("service_choice", "shoe_clean"),
+                state["weight_kg"],
+                state.get("delivery_type", "standard"),
+            )
+            bill_msg = f"💵 <b>{qty} pair{'s' if qty != 1 else ''} of shoes</b> — Total: <b>₹{total_bill or 0}</b>.\n\n" if total_bill else ""
+            return (
+                _progress("pickup_type")
+                + bill_msg
+                + "📍 <b>Pickup option</b>\n\n"
+                "• <b>1</b> — I’ll drop at outlet (you bring shoes to store)\n"
+                "• <b>2</b> — Pickup from my address (we pick up & deliver back)\n\n"
+                "Reply with <b>1</b> or <b>2</b>."
+            )
+        if step == "home_textiles_type":
+            type_map = {"1": "bedsheet", "2": "carpet", "3": "curtains"}
+            state["home_textiles_type"] = type_map.get(message, "bedsheet")
+            state["step"] = "weight"
+            _booking_state[chat_id] = state
+            type_label = state["home_textiles_type"].title()
+            return (
+                _progress("weight")
+                + f"🛏️ <b>Home textiles ({type_label})</b> — How many items or weight?\n\n"
+                "Send <b>number of items</b> (e.g. 2 bedsheets, 1 carpet) or <b>weight in kg</b> (e.g. 3 kg)."
+            )
+        if step == "iron_quantity":
+            # Accept number of pieces (e.g. 5, 10) or weight (e.g. 2 or 2.5)
+            qty = _parse_quantity(raw, min_val=1, max_val=100)
+            if qty is not None:
+                state["weight_kg"] = round(max(0.5, qty * _WEIGHT_PER_IRON_PIECE), 2)
+                state["weight_note"] = f"{int(qty)} piece{'s' if qty != 1 else ''} to iron"
+            else:
+                weight_kg, weight_note = _parse_weight_from_message(raw)
+                if weight_kg is None or weight_kg < 0.5 or weight_kg > 100:
+                    _booking_state[chat_id] = state
+                    return (
+                        _progress("iron_quantity")
+                        + "👔 Reply with <b>number of pieces</b> (e.g. 5, 10) or <b>weight in kg</b> (e.g. 2)."
+                    )
+                state["weight_kg"] = weight_kg
+                state["weight_note"] = weight_note or f"{weight_kg} kg"
+            state["step"] = "pickup_type"
+            _booking_state[chat_id] = state
+            total_bill = estimate_price(
+                state.get("service_choice", "premium_iron"),
+                state["weight_kg"],
+                state.get("delivery_type", "standard"),
+            )
+            bill_msg = f"💵 Your total: <b>₹{total_bill or 0}</b>.\n\n" if total_bill else ""
+            return (
+                _progress("pickup_type")
+                + bill_msg
+                + "📍 <b>Pickup option</b>\n\n"
+                "• <b>1</b> — I’ll drop at outlet\n"
+                "• <b>2</b> — Pickup from my address\n\n"
+                "Reply with <b>1</b> or <b>2</b>."
+            )
         if step == "weight":
-            weight_kg, weight_note = _parse_weight_from_message(raw)
+            if state.get("service_choice") == "home_textiles" and state.get("home_textiles_type"):
+                weight_kg, weight_note = _parse_home_textiles_weight(raw, state["home_textiles_type"])
+            else:
+                weight_kg, weight_note = _parse_weight_from_message(raw)
             if weight_kg is None:
                 _booking_state[chat_id] = state
+                if state.get("service_choice") == "home_textiles":
+                    return (
+                        _progress("weight")
+                        + "🛏️ Send <b>number of items</b> (e.g. 2, 3) or <b>weight in kg</b> (e.g. 2 kg)."
+                    )
                 return (
                     _progress("weight")
                     + "⚖️ Send weight in <b>kg</b> (e.g. 2 or 3.5) or <b>clothes count</b> "
